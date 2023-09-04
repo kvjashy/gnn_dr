@@ -12,11 +12,11 @@ def flatten(t): return [item for sublist in t for item in sublist]
 def relation_matrix_to_adjacency_matrix(relation_matrix: List[List],
                                         self_loop: bool = True):
 
-    edge_matrix = sparse.csr_matrix(relation_matrix, dtype=np.long)
+    edge_matrix = sparse.csr_matrix(relation_matrix, dtype=int)
 
     if self_loop:
         edge_matrix += sparse.csr_matrix(np.diag(
-            np.ones(edge_matrix.shape[0], dtype=np.long)))
+            np.ones(edge_matrix.shape[0], dtype=int)))
 
     return utils.from_scipy_sparse_matrix(edge_matrix)
 

@@ -5,7 +5,7 @@ policy: MlpPolicy
 
 device: cpu
 
-total_timesteps: 5000000
+total_timesteps: !!float 2e6
 n_steps: 1000
 batch_size: 64
 

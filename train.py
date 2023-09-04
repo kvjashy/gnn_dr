@@ -19,9 +19,14 @@ import pybullet_data
 import pybullet_envs  # register pybullet envs from bullet3
 
 from NerveNet.graph_util.mujoco_parser_settings import ControllerOption, EmbeddingOption, RootRelationOption
-from NerveNet.models import nerve_net_conv
+from NerveNet.models import nerve_net_conv 
 from NerveNet.policies import register_policies
 import NerveNet.gym_envs.pybullet.register_disability_envs
+from NerveNet.models.dropout_state import DropoutState, DropoutManager 
+from NerveNet.models.nerve_net_conv import SimulatedAnnealingDropout
+from NerveNet.models.drop_call import RewardCallback
+
+
 
 import gym
 from stable_baselines3 import PPO, A2C
@@ -135,6 +140,7 @@ def train(args):
     alg_kwargs.pop("use_sibling_relations", None)
     alg_kwargs.pop("experiment_name_suffix", None)
     alg_kwargs.pop("policy_readout_mode", None)
+    dropout_optimizer =  SimulatedAnnealingDropout()
 
     model = alg_class(args.policy,
                       env,
@@ -147,6 +153,10 @@ def train(args):
                       #   batch_size=args.batch_size,
                       #   n_epochs=args.n_epochs,
                       **alg_kwargs)
+    
+    policy_instance = model
+    dropout_manager = DropoutManager(model=policy_instance, optimizer=dropout_optimizer)
+    callbacks.append(RewardCallback(dropout_optimizer = dropout_optimizer, manager=dropout_manager))
 
     model.learn(total_timesteps=args.total_timesteps,
                 callback=callbacks,
@@ -167,7 +177,7 @@ def dir_path(path):
 def parse_arguments():
     p = argparse.ArgumentParser()
     p.add_argument('--config', type=argparse.FileType(mode='r'),
-                   default='configs/GNN_AntBulletEnv-v02.yaml')
+                   default='configs/GNN_AntBulletEnv-v0.yaml')
     p.add_argument('--task_name', help='The name of the environment to use')
     p.add_argument('--xml_assets_path',
                    help="The path to the directory where the xml of the task's robot is defined",
@@ -205,7 +215,7 @@ def parse_arguments():
 
     p.add_argument('--seed', help='Random seed',
                    type=int,
-                   default=1)
+                   default=3)
     p.add_argument('--device',
                    help='Device (cpu, cuda, ...) on which the code should be run.'
                         'Setting it to auto, the code will be run on the GPU if possible.',

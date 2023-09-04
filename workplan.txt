@@ -1,0 +1,5 @@
+Send an email github question abou the repo
+implement testing for each dropout technique seperatly and also together 
+implement testing comparing graphsage and gcn 
+make a custom GNN class for every instance instead of working with the same class
+

@@ -165,7 +165,7 @@ def parse_arguments():
     p.add_argument('--train_output',
                    help="The directory where the training output & configs were logged to",
                    type=dir_path,
-                   default='runs/Nervenet-V1-hannes')
+                   default='runs/_NerveNetSage')
 
     p.add_argument("--num_episodes",
                    help="The number of episodes to run to evaluate the model",
@@ -177,7 +177,7 @@ def parse_arguments():
                    type=str,
                    # default="AntBulletEnv-v0")
                    # default="AntSixLegsEnv-v0")
-                   default="AntCpLeftBackBulletEnv-v0")
+                   default="AntSixLegsEnv-v0")
 
     p.add_argument('--xml_assets_path',
                    help="The path to the directory where the xml of the transfer task's robot is defined",

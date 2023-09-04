@@ -14,7 +14,10 @@ from NerveNet.graph_util.mujoco_parser import parse_mujoco_graph
 from NerveNet.graph_util.mujoco_parser_settings import EmbeddingOption, RootRelationOption, ControllerOption
 from NerveNet.graph_util.observation_mapper import get_update_masks, observations_to_node_attributes, \
     relation_matrix_to_adjacency_matrix, get_static_node_attributes
-from NerveNet.models.nerve_net_conv import NerveNetConv, NerveNetConv_v1, NerveNetConvGRU, NerveNetConvGAT
+from NerveNet.models.nerve_net_conv import NerveNetConv, NerveNetConv_v1, NerveNetConvGRU, NerveNetConvGAT, NerveNetSage, ConvDrop, GCNConvGroups
+from NerveNet.models.nerve_net_opt import dropout_manager, DynamicDropout, SimulatedAnnealingDropout
+from NerveNet.models.drop_call import RewardCallback
+from NerveNet.models.dropout_state import DropoutLayer, DropoutManager
 
 
 class NerveNetGNN(nn.Module):
@@ -37,7 +40,7 @@ class NerveNetGNN(nn.Module):
                  root_option: RootRelationOption = RootRelationOption.NONE,
                  embedding_option=EmbeddingOption.SHARED,
                  controller_option: ControllerOption = ControllerOption.SHARED,
-                 device: Union[torch.device, str] = "auto",
+                 device: Union[torch.device, str] = "cpu",
                  task_name: str = None,
                  xml_name: str = None,
                  xml_assets_path: Union[str, Path] = None,
@@ -133,6 +136,7 @@ class NerveNetGNN(nn.Module):
                                                                     self.static_node_attr_mask,
                                                                     self.static_node_attr.shape,
                                                                     self.info["input_type_dict"])
+        # print(f"update_masks {self.update_masks} \n observation_mask {self.observation_mask}")
 
         self.shared_input_nets = nn.ModuleDict()
         gnn_policy = nn.ModuleList()
@@ -163,10 +167,10 @@ class NerveNetGNN(nn.Module):
             else:
                 shared_input_layers.append(nn.Identity())
                 last_layer_dim_input = net_arch["input"][-1][1]
-
+            # print(f"net_arch {last_layer_dim_input}")
             self.shared_input_nets[group_name] = nn.Sequential(
                 *shared_input_layers).to(self.device)
-
+            # print(f"self.shared_input_nets{self.shared_input_nets}")
         # max_static_feature_dim = self.static_node_attr.shape[1]
         # max_obs_feature_dim = max(
         #     [len(l) for l in self.info["obs_input_mapping"].values()])
@@ -174,50 +178,54 @@ class NerveNetGNN(nn.Module):
 
         self.last_layer_dim_input = last_layer_dim_input
         last_layer_dim_shared = last_layer_dim_input
+        # print(f"lastlayer_dim_shared {last_layer_dim_shared}")
+        # print(f"se;f.lastlayer_dim_input {self.last_layer_dim_input}")
 
         # Iterate through the shared layers and build the shared parts of the network
         # only the shared network may have GCN convolutions
+        self.dropout_optimizer = SimulatedAnnealingDropout()
+        self.dropout_rate = 0
         for layer_class, layer_size in net_arch["propagate"]:
-            # TODO: give layer a meaningful name
-            if issubclass(layer_class, NerveNetConv):
-                gnn_values.append(layer_class(last_layer_dim_shared,
-                                              layer_size,
-                                              self.update_masks, device=device).to(self.device))
-                gnn_policy.append(layer_class(last_layer_dim_shared,
-                                              layer_size,
-                                              self.update_masks, device=device).to(self.device))
+            if layer_class == NerveNetConv:
+                if layer_class != net_arch["propagate"][-1][0]:
+                    gnn_values.append(layer_class(last_layer_dim_shared,
+                                                layer_size,
+                                                self.update_masks, device=device).to(self.device))
+                    gnn_policy.append(layer_class(last_layer_dim_shared,
+                                                layer_size,
+                                                self.update_masks, device=device).to(self.device))
+                    gnn_policy.append(activation_fn())
+                    # print(f"updated_dropout_rate {updated_dropout_rate}")
+                    # print(dropout_optimizer.dropout_rate)
+                    # gnn_policy.append(dropout_layer)
+                    gnn_values.append(activation_fn())   
+            elif layer_class == NerveNetSage:
+                if layer_class != net_arch["propagate"][-1][0]:
+                    gnn_values.append(layer_class(last_layer_dim_shared,
+                                                layer_size,
+                                                self.update_masks, device=device).to(self.device))
+                    gnn_policy.append(layer_class(last_layer_dim_shared,
+                                                layer_size,
+                                                self.update_masks, device=device).to(self.device))
+                    gnn_policy.append(activation_fn())
+                    # print(f"updated_dropout_rate {updated_dropout_rate}")
+                    # print(dropout_optimizer.dropout_rate)
+                    # gnn_policy.append(dropout_layer)
+                    gnn_values.append(activation_fn())  
             elif layer_class == NerveNetConvGRU:
                 gnn_values.append(layer_class(*layer_size,
                                               self.update_masks).to(self.device))
                 gnn_policy.append(layer_class(*layer_size,
                                               self.update_masks).to(self.device))
-            elif layer_class == NerveNetConvGAT:
-                gnn_values.append(layer_class(last_layer_dim_shared,
-                                              *layer_size[:],
-                                              # we already added self_loops ourselves
-                                              add_self_loops=False).to(self.device))
-                gnn_policy.append(layer_class(last_layer_dim_shared,
-                                              *layer_size[:],
-                                              # we already added self_loops ourselves
-                                              add_self_loops=False).to(self.device))
 
-            elif issubclass(layer_class, GCNConv):
-                # for GCN Conv we need an additional parameter for the constructor
-                gnn_values.append(layer_class(last_layer_dim_shared,
-                                              layer_size,
-                                              # we already added self_loops ourselves
-                                              add_self_loops=False).to(self.device))
-                gnn_policy.append(layer_class(last_layer_dim_shared,
-                                              layer_size,
-                                              # we already added self_loops ourselves
-                                              add_self_loops=False).to(self.device))
             else:
                 gnn_values.append(layer_class(last_layer_dim_shared,
                                               layer_size).to(self.device))
                 gnn_policy.append(layer_class(last_layer_dim_shared,
                                               layer_size).to(self.device))
-            gnn_policy.append(activation_fn())
-            gnn_values.append(activation_fn())
+                gnn_policy.append(activation_fn())
+                gnn_values.append(activation_fn())
+                print(gnn_policy)
             if layer_class == NerveNetConv_v1:
                 # NerveNetConv_v1 uses a form of skip connection, the layer output needs to be calculated accordingly
                 last_layer_dim_shared = last_layer_dim_shared + layer_size
@@ -323,24 +331,45 @@ class NerveNetGNN(nn.Module):
                 embedding[:, node_mask, :] = self.shared_input_nets[group_name](
                     sp_embedding[:, node_mask][:, :, attribute_mask])
         return embedding
-
+        
     def _forward_gnns(self, embedding) -> Tuple[torch.Tensor, torch.Tensor]:
+
         policy_embedding = embedding
-        for layer in self.gnn_policy:
+        num_layers = len(self.gnn_policy)
+        pre_activation_embeddings = []
+        
+        for idx, layer in enumerate(self.gnn_policy):
+
             if isinstance(layer, NerveNetConvGAT):
-                # GATs don't support batched input...
-                # for i in range(embedding.shape[0]):
-                #     policy_embedding[[i], :, :] = layer(
-                #         policy_embedding[i], self.edge_index).to(self.device)
-                policy_embedding = layer(
-                    policy_embedding, self.edge_index).to(self.device)
+                policy_embedding = layer(policy_embedding, self.edge_index).to(self.device)
 
             elif isinstance(layer, MessagePassing):
-                policy_embedding = layer(policy_embedding, self.edge_index,
-                                         self.update_masks).to(self.device)  # [batch_size, number_nodes, features_dim]
+                policy_embedding = layer(policy_embedding, self.edge_index, self.update_masks).to(self.device) 
+                pre_activation_embeddings.append(policy_embedding.clone())  # Store the pre-activation embedding
+
+                if idx == 2:  # This assumes your layers are in sequence [GNN, tanh, GNN, tanh, GNN, tanh, Linear, tanh]
+                    policy_embedding += pre_activation_embeddings[0]
+
+                # For 3rd GNN layer, add the embedding from the 2nd GNN layer pre-activation
+                if idx == 4:  # Again, assumes the sequence [GNN, tanh, GNN, tanh, GNN, tanh, Linear, tanh]
+                    policy_embedding += pre_activation_embeddings[1]
+
+                if idx == 6:  # Again, assumes the sequence [GNN, tanh, GNN, tanh, GNN, tanh, Linear, tanh]
+                    policy_embedding += pre_activation_embeddings[1]
+
+            # Skipping dropout for torch.nn.Dropout layer, but if you have a custom DropoutLayer, you can uncomment that block.
+            # elif isinstance(layer, torch.nn.Dropout):
+            #     continue
+            elif isinstance(layer, nn.Linear):
+                    policy_embedding = layer(policy_embedding).to(self.device)
             else:
-                policy_embedding = layer(policy_embedding).to(
-                    self.device)  # [batch_size, number_nodes, features_dim]
+                policy_embedding = layer(policy_embedding).to(self.device)
+
+                # Avoid applying dropout for the last tanh layer so only applying after every GNN layer 
+                # if idx != num_layers - 2:
+                #     # print(self.dropout_rate)
+                #     policy_embedding = F.dropout(policy_embedding, p=self.dropout_rate)
+                # print(self.dropout_rate)
 
         value_embedding = embedding
         for layer in self.gnn_values:
@@ -358,8 +387,11 @@ class NerveNetGNN(nn.Module):
             else:
                 # [batch_size, number_nodes, features_dim]
                 value_embedding = layer(value_embedding).to(self.device)
-
         return policy_embedding, value_embedding
+
+    def set_dropout_rate(self, dropout_rate):
+        self.dropout_rate = dropout_rate
+
 
     def _forward_value_net(self, value_embedding, observations) -> torch.Tensor:
         if self.is_transfer_env:
@@ -407,7 +439,6 @@ class NerveNetGNN(nn.Module):
                     # input to policy_net is [batch_size, num_nodes * num_features ]
                     latent_pis[:, out_idx] = policy_net(
                         policy_embedding.view(observations.shape[0], -1))
-
         return latent_pis
 
     def forward(self, observations: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -549,8 +580,8 @@ class NerveNetGNN_V2(NerveNetGNN):
                         policy_embedding.view(observations.shape[0], -1))
 
         return latent_pis, log_std_action
-
-
+    
+    
 # This is the old version of our NerveNetGNN from the intermediate presentation
 class NerveNetGNN_V0(nn.Module):
     """
@@ -796,3 +827,63 @@ class NerveNetGNN_V0(nn.Module):
 
         latent_pi = self.policy_net(embedding)
         return latent_pi, latent_vf
+
+class NerveNetDrop(NerveNetGNN):
+
+    def _forward_gnns(self, embedding) -> Tuple[torch.Tensor, torch.Tensor]:
+        policy_embedding = embedding
+        gamma =  policy_embedding.shape[1]
+        p = 2 * 1 /(1+gamma)
+        for i, layer in enumerate(self.gnn_policy):
+            print(layer) 
+            if i==0 and isinstance(layer, MessagePassing):
+                policy_embedding = layer(policy_embedding, self.edge_index, self.update_masks).to(
+                    self.device)
+                inital_policy_embedding =  policy_embedding 
+
+            elif isinstance(layer, MessagePassing):
+                policy_embedding = layer(policy_embedding, self.edge_index,
+                                         self.update_masks)
+                policy_embedding = (policy_embedding + inital_policy_embedding).to(self.device)  # [batch_size, number_nodes, features_dim]
+                drop = torch.bernoulli(torch.ones([policy_embedding.size(0), policy_embedding.size(1), policy_embedding.size(2)], device=self.device) * p).bool()
+        # print(f"x1.6{x.size()}") 
+                policy_embedding[drop] = torch.zeros_like(policy_embedding[drop], device=policy_embedding.device)
+                del drop 
+            else:
+                policy_embedding = layer(policy_embedding).to(
+                    self.device)  # [batch_size, number_nodes, features_dim]
+        policy_embedding = embedding
+        # for layer in self.gnn_policy:
+        #     if isinstance(layer, NerveNetConvGAT):
+        #         # GATs don't support batched input...
+        #         # for i in range(embedding.shape[0]):
+        #         #     policy_embedding[[i], :, :] = layer(
+        #         #         policy_embedding[i], self.edge_index).to(self.device)
+        #         policy_embedding = layer(
+        #             policy_embedding, self.edge_index).to(self.device)
+
+        #     elif isinstance(layer, MessagePassing):
+        #         policy_embedding = layer(policy_embedding, self.edge_index,
+        #                                  self.update_masks).to(self.device)  # [batch_size, number_nodes, features_dim]
+        #     else:
+        #         policy_embedding = layer(policy_embedding).to(
+        #             self.device)  # [batch_size, number_nodes, features_dim]
+                
+        value_embedding = embedding
+        for layer in self.gnn_values:
+            if isinstance(layer, NerveNetConvGAT):
+                # GATs don't support batched input...
+                # for i in range(embedding.shape[0]):
+                #     value_embedding[[i], :, :] = layer(
+                #         value_embedding[i], self.edge_index).to(self.device)
+                value_embedding = layer(
+                    value_embedding, self.edge_index).to(self.device)
+
+            elif isinstance(layer, MessagePassing):
+                value_embedding = layer(value_embedding, self.edge_index,
+                                        self.update_masks).to(self.device)  # [batch_size, number_nodes, features_dim]
+            else:
+                # [batch_size, number_nodes, features_dim]
+                value_embedding = layer(value_embedding).to(self.device)
+        return policy_embedding, value_embedding
+

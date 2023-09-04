@@ -24,7 +24,7 @@ from NerveNet.graph_util.mujoco_parser_settings import ALLOWED_NODE_TYPES, SUPPO
 __all__ = ["parse_mujoco_graph"]
 
 XML_ASSETS_DIR = Path(pybullet_data.getDataPath()) / "mjcf"
-
+print(f"XML_ASSETS_DIR{XML_ASSETS_DIR}")
 
 def parse_mujoco_graph(task_name: str = None,
                        xml_name: str = None,
@@ -342,7 +342,7 @@ def __build_relation_matrix(tree: List[dict],
 
     '''
     num_node = len(tree)
-    relation_matrix = np.zeros([num_node, num_node], dtype=np.int)
+    relation_matrix = np.zeros([num_node, num_node], dtype=int)
 
     # nodes with outgoing edge
     for node_out in tree:
@@ -503,7 +503,7 @@ def __get_input_mapping(task_name: str, tree: List[dict], embedding_option: Embe
                              if node["type"] == "body"]))
 
     # this is how many observations we have for the root node
-    # the observations for the joints follow after these
+    # the observations for the joints follow after theseconfigs/GNN_HalfCheetahBulletEnv-v0.yaml
     # TODO: verify that this can indeed be a constant
     _root_obs_size = 8
     _num_obs_per_joint = 2

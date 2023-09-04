@@ -3,18 +3,23 @@ from torch_geometric.typing import (OptPairTensor, Adj, Size, NoneType,
                                     OptTensor)
 import torch
 from stable_baselines3.common.utils import get_device
+from stable_baselines3.common import logger
 from torch import Tensor
+from torch_geometric.utils import add_self_loops, degree
 from torch import nn
-from torch.nn import Parameter
+from torch.nn import Parameter 
+import torch.nn.functional as F
 from torch_sparse import SparseTensor, matmul
-from torch_geometric.nn.conv import MessagePassing, GatedGraphConv, GATConv
+from torch_geometric.nn.conv import MessagePassing, GatedGraphConv, GATConv, SAGEConv, GCNConv, ChebConv, GINConv
+from torch_geometric.nn.models import GraphSAGE, GIN
 from torch_geometric.utils import add_remaining_self_loops, remove_self_loops
-from torch_geometric.utils.num_nodes import maybe_num_nodes
+from torch_geometric.utils.num_nodes import maybe_num_nodes 
 from torch_geometric.typing import Adj, OptTensor, PairTensor
-
+from NerveNet.models.nerve_net_opt import dropout_manager, DynamicDropout, SimulatedAnnealingDropout
 from NerveNet.models.utils import glorot, zeros, uniform
+from torch_geometric.nn import Aggregation, MessagePassing
 
-
+        
 class NerveNetConv(MessagePassing):
     r"""
 
@@ -43,6 +48,7 @@ class NerveNetConv(MessagePassing):
                  device: Union[torch.device, str] = "auto",
                  cached: bool = False,
                  bias: bool = True,
+                 dropout_optimizer: SimulatedAnnealingDropout = None,
                  **kwargs):
 
         kwargs.setdefault('aggr', 'add')
@@ -53,6 +59,7 @@ class NerveNetConv(MessagePassing):
         self.update_masks = update_masks
         self.use_bias = bias
         self.cached = cached
+        self.dropout_optmizier = dropout_optimizer
         self.device = get_device(device)
 
         self._cached_edge_index = None
@@ -79,18 +86,24 @@ class NerveNetConv(MessagePassing):
         self._cached_edge_index = None
         self._cached_adj_t = None
 
+
     def forward(self, x: Tensor, edge_index: Adj,
                 update_masks: dict = None) -> Tensor:
         """
-
         """
-
         # propagate_type: (x: Tensor, edge_weight: OptTensor)
+        # print(f"x {x} \n update_masks {update_masks}")
         if update_masks is not None:
             self.update_masks = update_masks
+        if self.dropout_optmizier is not None:
+            self.dropout_rate = self.dropout_optmizier.dropout_rate
+        else:
+            # A default value or some other mechanism in case the manager isn't provided
+            self.dropout_rate = 0
+        x = F.dropout(x, p=self.dropout_rate, training=self.training)
+
         out = self.propagate(edge_index, x=x, update_masks=update_masks,
                              size=None)
-
         return out
 
     def message(self, x_j: Tensor, update_masks: dict) -> Tensor:
@@ -129,9 +142,7 @@ class NerveNetConv(MessagePassing):
     def __repr__(self):
         return '{}({}, {})'.format(self.__class__.__name__, self.in_channels,
                                    self.out_channels)
-
-
-class NerveNetConv_v1(NerveNetConv):
+class NerveNetConv_v1(MessagePassing): ## try out this architecture to see results 
     """
         A message passing schema for nervenet with "Ego- and Neighbor-embedding Separation" 
         as described in "Beyond Homophily in Graph Neural Networks: Current Limitations and Effective Designs"
@@ -154,6 +165,313 @@ class NerveNetConv_v1(NerveNetConv):
 
         return out
 
+class NerveNetSage(SAGEConv):
+    def __init__(self,
+                 in_channels: Union[int, Tuple[int, int]],
+                 out_channels: int,
+                 update_masks: Dict[str, Tuple[List[int], int]],
+                 device: Union[torch.device, str] = "cpu",
+                 aggr: Optional[Union[str, List[str], Aggregation]] = "mean",
+                 normalize: bool = False,
+                 bias: bool =  True,
+                 project: bool = False,
+                 root_weight: bool = True,
+                 **kwargs):
+        
+        if isinstance(in_channels, int):
+            in_channels = (in_channels, in_channels)
+        print(f"in{in_channels}")
+        super(SAGEConv, self).__init__(aggr, **kwargs)
+         
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.update_masks = update_masks
+        self.device = device  
+        self.project = project  
+        self.bias = bias 
+        self.root_weight = root_weight 
+        self.normalize = normalize
+
+
+        self.update_models_parameter = {}
+        for group_name, _ in update_masks.items():
+            self.update_models_parameter[group_name] = {}
+            self.lin_l = nn.Linear(in_channels[0], out_channels, bias=bias)
+            self.update_models_parameter[group_name]["lin_l"] = Parameter(
+                torch.Tensor(self.lin_l.weight)).to(self.device)
+
+            if self.project:
+                self.lin = nn.Linear(in_channels[0], in_channels[0], bias=True)
+                self.update_models_parameter[group_name]["lin"] = Parameter(
+                    torch.Tensor(self.lin.weight)).to(self.device)
+            else:
+                self.update_models_parameter[group_name]["lin"] = None
+            
+            if self.root_weight:
+                self.lin_r = nn.Linear(in_channels[1], out_channels, bias=False)
+                self.update_models_parameter[group_name]["lin_r"] = Parameter(
+                torch.Tensor(self.lin_r.weight)).to(self.device)
+            else:
+                self.update_models_parameter[group_name]["lin_r"] = None
+
+        self.reset_parameters() 
+    
+    def reset_parameters(self):
+        super().reset_parameters()
+        for _, params in self.update_models_parameter.items():
+            if self.project:
+                self.lin.reset_parameters()
+            self.lin_l.reset_parameters()
+            if self.root_weight:
+                self.lin_r.reset_parameters()
+
+    def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
+                update_masks: dict = None) -> Tensor:
+        
+        if isinstance(x, Tensor):
+            x: OptPairTensor = (x, x)
+
+        if self.project and hasattr(self, 'lin'):
+            x = (self.lin(x[0]).relu(), x[1])
+       
+        if update_masks is not None:
+            self.update_masks = update_masks 
+        
+        out = self.propagate(edge_index, x=x, update_masks=update_masks,
+                             size=None)
+        out = self.lin_l(out)
+        # print(f"out {out.shape}")
+        ## dont know if the rest of this part is needed
+        x_r = x[1]
+    
+        if self.root_weight and x_r is not None:
+            out = out + self.lin_r(x_r)
+
+        if self.normalize:
+            out = F.normalize(out, p=2., dim=-1)
+        
+        return out 
+
+    def message(self, x_j: Tensor) -> Tensor:
+        return x_j
+
+    def message_and_aggregate(self, adj_t: SparseTensor,
+                              x: Tensor) -> Tensor:
+        if isinstance(adj_t, SparseTensor):
+            adj_t = adj_t.set_value(None, layout=None)
+        return matmul(adj_t, x, reduce=self.aggr)
+
+
+class NerveNetCheb(ChebConv):
+    def __init__(self, 
+                 in_channels: int, 
+                 out_channels: int,
+                 update_masks: Dict[str, Tuple[List[int], int]],
+                 K: int, 
+                 device: Union[torch.device, str] = "cpu",
+                 normalization: str | None = 'sym', 
+                 bias: bool = True, 
+                 **kwargs
+    ):
+        kwargs.setdefault('aggr', 'add')
+
+        super(ChebConv).__init__(**kwargs)
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.K = K
+        self.normalization = normalization
+        self.bias = bias
+        self.device = device
+
+        self.update_models_parameter = {}
+        for group_name, _ in update_masks.items():
+            self.update_models_parameter[group_name] = {}
+            self.lins = nn.Linear(in_channels, out_channels, bias=False)
+            self.update_models_parameter[group_name]["lins"] = Parameter(
+                torch.Tensor(self.lins.weight)).to(self.device)
+
+            if self.bias:
+                self.bias = Parameter(torch.Tensor(out_channels))
+                self.update_models_parameter[group_name]["bias"] = self.bias.to(self.device)
+            else: 
+                self.update_models_parameter[group_name]["bias"] = None
+            
+class ConvDrop(MessagePassing):
+    r"""
+
+    Args:
+        in_channels (int): Size of each input sample.
+        out_channels (int): Size of each output sample.
+        cached (bool, optional): If set to :obj:`True`, the layer will cache
+            the computation of :math:`\mathbf{\hat{D}}^{-1/2} \mathbf{\hat{A}}
+            \mathbf{\hat{D}}^{-1/2}` on first execution, and will use the
+            cached version for further executions.
+            This parameter should only be set to :obj:`True` in transductive
+            learning scenarios. (default: :obj:`False`)
+        bias (bool, optional): If set to :obj:`False`, the layer will not learn
+            an additive bias. (default: :obj:`True`)
+        **kwargs (optional): Additional arguments of
+            :class:`torch_geometric.nn.conv.MessagePassing`.
+    """
+     ## allowing this sort of dropout to distringuish between soimilar neighbourhoods would be benefical for analysing 
+     # slight modification in agent structure 
+    _cached_edge_index: Optional[Tuple[Tensor, Tensor]]
+    _cached_adj_t: Optional[SparseTensor]
+
+    def __init__(self,
+                 in_channels: int,
+                 out_channels: int,
+                 update_masks: Dict[str, Tuple[List[int], int]],
+                 device: Union[torch.device, str] = "auto",
+                 cached: bool = False,
+                 bias: bool = True,
+                 **kwargs):
+
+        kwargs.setdefault('aggr', 'add')
+        super(ConvDrop, self).__init__(**kwargs)
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.update_masks = update_masks
+        self.use_bias = bias
+        self.cached = cached
+        self.device = get_device(device)
+
+        self._cached_edge_index = None
+        self._cached_adj_t = None
+
+        self.update_models_parameter = {}
+        for group_name, _ in update_masks.items():
+            self.update_models_parameter[group_name] = {}
+            self.update_models_parameter[group_name]["weights"] = Parameter(
+                torch.Tensor(in_channels, out_channels)).to(self.device)
+
+            if self.use_bias:
+                self.update_models_parameter[group_name]["bias"] = Parameter(
+                    torch.Tensor(out_channels)).to(self.device)
+            else:
+                self.update_models_parameter[group_name]["bias"] = None
+
+        # print(f"update_models_parameter {self.update_models_parameter[group_name]['weights'].shape}")
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for _, params in self.update_models_parameter.items():
+            glorot(params["weights"])
+            zeros(params["bias"])
+        self._cached_edge_index = None
+        self._cached_adj_t = None
+
+    def forward(self, x: Tensor, edge_index: Adj,
+                update_masks: dict = None) -> Tensor:
+        """
+
+        """
+
+        gamma =  x.shape[1]
+        p = 2 * 1 /(1+gamma)
+        num_runs = gamma
+        x = x.view(-1, x.size(-1)) 
+        # print(f"x1{x.size()}") ## [1,9,12] [BatchSize, number of nodes, features per node]
+        # propagate_type: (x: Tensor, edge_weight: OptTensor)
+        x = x.unsqueeze(0).expand(num_runs, -1, -1).clone()
+        drop = torch.bernoulli(torch.ones([x.size(0), x.size(1), x.size(2)], device=x.device) * p).bool()
+        x[drop] = torch.zeros_like(x[drop], device=x.device)
+        del drop
+        # run_edge_index = edge_index.repeat(1, num_runs) + torch.arange(num_runs, device=edge_index.device).repeat_interleave(edge_index.size(1)) * (edge_index.max() + 1)
+
+
+        if update_masks is not None:
+            self.update_masks = update_masks
+        out = self.propagate(edge_index, x=x, update_masks=update_masks,
+                             size=None)
+        x = x.view(num_runs, -1, x.size(-1))
+        out_mean = torch.mean(out, dim=0, keepdim=True)
+        # print(f"out{out_mean.shape}") 
+
+        return out_mean
+
+    def message(self, x_j: Tensor, update_masks: dict) -> Tensor:
+        r"""Constructs messages from node :math:`j` to node :math:`i`
+        in analogy to :math:`\phi_{\mathbf{\Theta}}` for each edge in
+        :obj:`edge_index`.
+        This function can take any argument as input which was initially
+        passed to :meth:`propagate`.
+        Furthermore, tensors passed to :meth:`propagate` can be mapped to the
+        respective nodes :math:`i` and :math:`j` by appending :obj:`_i` or
+        :obj:`_j` to the variable name, *.e.g.* :obj:`x_i` and :obj:`x_j`.
+        """
+        return x_j
+
+    def update(self, inputs: Tensor) -> Tensor:
+        r"""Updates node embeddings in analogy to
+        :math:`\gamma_{\mathbf{\Theta}}` for each node
+        :math:`i \in \mathcal{V}`.
+        Takes in the output of aggregation as first argument and any argument
+        which was initially passed to :meth:`propagate`.
+        """
+        inputs = torch.mean(inputs, dim=0, keepdim=True)
+
+        # print(f"inputs {inputs.shape}")
+        embedding = torch.zeros(
+            (*inputs.shape[:-1], self.out_channels)).to(self.device)
+        for group_name, (update_mask, _) in self.update_masks.items():
+            masked_inputs = inputs[:, update_mask]
+            embedding[:, update_mask] = torch.matmul(
+                masked_inputs,
+                self.update_models_parameter[group_name]["weights"])
+            if self.use_bias:
+                embedding[:, update_mask] += self.update_models_parameter[group_name]["bias"]
+        return embedding
+
+    def __repr__(self):
+        return '{}({}, {})'.format(self.__class__.__name__, self.in_channels,
+                                   self.out_channels)
+   
+class GCN(GCNConv):
+    cached_edge_index: Optional[OptPairTensor]
+    cached_adj_t: Optional[SparseTensor]
+
+    def __init__(self, in_channels: int, out_channels: int, update_masks: Dict[str, Tuple[List[int], int]],
+                 improved: bool = False, cached: bool = False,
+                 add_self_loops: bool = True, normalize: bool = True,
+                 bias: bool = True, **kwargs):
+
+        kwargs.setdefault('aggr', 'add')
+        super().__init__(**kwargs)
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.improved = improved
+        self.cached = cached
+        self.add_self_loops = add_self_loops
+        self.normalize = normalize
+
+        self._cached_edge_index = None
+        self._cached_adj_t = None
+
+        self.update_models_parameter = {}
+        for group_name, _ in update_masks.items():
+            self.update_models_parameter[group_name] = {}
+            self.update_models_parameter[group_name]["weights"] = Parameter(
+                torch.Tensor(in_channels, out_channels)).to(self.device)
+
+            if self.bias:
+                self.update_models_parameter[group_name]["bias"] = Parameter(
+                    torch.Tensor(out_channels)).to(self.device)
+            else:
+                self.update_models_parameter[group_name]["bias"] = None
+
+        self.lin = nn.Linear(in_channels, out_channels, bias=False,
+                          weight_initializer='glorot')
+
+        if bias:
+            self.bias = Parameter(torch.Tensor(out_channels))
+        else:
+            self.register_parameter('bias', None)
+
+        self.reset_parameters()
 
 class NerveNetConvGRU(GatedGraphConv):
 
@@ -229,7 +547,6 @@ class NerveNetConvGRU(GatedGraphConv):
                                               self.out_channels,
                                               self.num_layers)
 
-
 class NerveNetConvGAT(GATConv):
     r"""
     Wrapper for the graph attentional operator from the `"Graph Attention Networks"
@@ -294,6 +611,7 @@ class NerveNetConvGAT(GATConv):
                 in_channels, heads * out_channels, bias=False)
             self.lin_r = self.lin_l
         else:
+            ## look at his line in case x happens to be a tuple 
             self.lin_l = nn.Linear(in_channels[0], heads * out_channels, False)
             self.lin_r = nn.Linear(in_channels[1], heads * out_channels, False)
 
@@ -310,6 +628,7 @@ class NerveNetConvGAT(GATConv):
         self._alpha = None
 
         self.reset_parameters()
+    
 
     def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
                 size: Size = None, return_attention_weights=None):
@@ -383,3 +702,48 @@ class NerveNetConvGAT(GATConv):
                 return out, edge_index.set_value(alpha, layout='coo')
         else:
             return out
+
+
+import torch
+from torch.nn import Parameter, functional as F
+from torch_geometric.nn import GCNConv
+from torch_geometric.utils import dropout_adj
+
+class GCNConvGroups(GCNConv):
+    def __init__(self, in_channels, out_channels, update_masks, device: Union[torch.device, str] = "auto",
+ improved=False, cached=False, bias=True, normalize=True, dropout=0.5):
+        super(GCNConvGroups, self).__init__(in_channels, out_channels, improved=improved, cached=cached, bias=bias, normalize=normalize)
+        
+        self.update_masks = update_masks
+        self.dropout = dropout
+        self.device = device 
+        
+        self.update_models_parameter = {}
+        for group_name, _ in update_masks.items():
+            self.update_models_parameter[group_name] = {}
+            self.update_models_parameter[group_name]["weights"] = Parameter(torch.Tensor(in_channels, out_channels)).to(self.device)
+            self.update_models_parameter[group_name]["bias"] = Parameter(torch.Tensor(out_channels)).to(self.device)
+        
+        self.reset_parameters_masked()
+
+    def reset_parameters_masked(self):
+        for _, params in self.update_models_parameter.items():
+            torch.nn.init.xavier_uniform_(params["weights"])
+            torch.nn.init.zeros_(params["bias"])
+
+    def forward(self, x, edge_index, edge_weight=None):
+        # Dropout on edges
+        edge_index, _ = dropout_adj(edge_index, p=self.dropout, training=self.training)
+        
+        # Apply masks before propagation
+        masked_x = torch.zeros_like(x)
+        for group_name, (update_mask, _) in self.update_masks.items():
+            masked_inputs = x[:, update_mask]
+            masked_x[:, update_mask] = torch.matmul(masked_inputs, self.update_models_parameter[group_name]["weights"])
+            masked_x[:, update_mask] += self.update_models_parameter[group_name]["bias"]
+        
+        # Original GCN propagation on masked features
+        return super(GCNConvGroups, self).forward(masked_x, edge_index, edge_weight)
+
+    def __repr__(self):
+        return '{}({}, {})'.format(self.__class__.__name__, self.in_channels, self.out_channels)

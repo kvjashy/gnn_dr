@@ -26,6 +26,11 @@ from stable_baselines3 import PPO, A2C
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 
 from util import LoggingCallback
+global previous_position, total_distance
+previous_position = None
+total_distance = 0
+distances_travelled = []  # To store distances traveled for each episode
+
 algorithms = dict(A2C=A2C, PPO=PPO)
 
 
@@ -60,13 +65,35 @@ def init_evaluate(args):
 
     if args.render:
         env.render()  # call this before env.reset, if you want a window showing the environment
-
     def logging_callback(local_args, globals):
+        global previous_position, total_distance
+
+        current_position = env.unwrapped.robot.body_xyz
+
+    # If we have a previous position, we update the distance.
+        if previous_position is not None:
+            distance = np.linalg.norm(np.array(current_position) - np.array(previous_position))
+            total_distance += distance
+
+        previous_position = current_position
+
+        if local_args["done"]:
+            distances_travelled.append(total_distance)  # Add the total distance for this episode to the list
+            i = len(local_args["episode_rewards"])
+            episode_reward = local_args.get("episode_reward", None)
+            # Include total_distance in the log.
+            # Reset for next episode.
+            total_distance = 0
+            previous_position = None
+
         if local_args["done"]:
             i = len(local_args["episode_rewards"])
-            episode_reward = local_args["episode_reward"]
-            episode_length = local_args["episode_length"]
-            print(f"Finished {i} episode with reward {episode_reward}")
+            episode_reward = local_args.get("episode_reward", None)
+            episode_length = local_args.get("episode_length", None)
+            if episode_reward is not None and episode_length is not None:
+                print(f"Finished {i} episode with reward {episode_reward} and length {episode_length} and distance_travelled {distances_travelled}")
+            else:
+                print(f"Finished {i} episode")
 
     episode_rewards, episode_lengths = evaluate_policy(model,
                                                        env,
@@ -81,14 +108,22 @@ def init_evaluate(args):
     mean_length = np.mean(episode_lengths)
     std_length = np.std(episode_lengths)
 
+    mean_distance = np.mean(distances_travelled)
+    std_distance = np.std(distances_travelled)
+
+
     print(f"mean_reward:{mean_reward:.2f} +/- {std_reward:.2f}")
     print(f"mean_length:{mean_length:.2f} +/- {std_length:.2f}")
+    print(f"mean_distance:{mean_distance:.2f} +/- {std_distance:.2f}")
+
 
     eval_dir = args.train_output / "evaluation"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     np.save(eval_dir / "episode_rewards.npy", episode_rewards)
     np.save(eval_dir / "episode_lengths.npy", episode_lengths)
+    np.save(eval_dir / "distances_travelled.npy", distances_travelled)
+
 
 
 def dir_path(path):
@@ -107,12 +142,12 @@ def parse_arguments():
     p.add_argument('--train_output',
                    help="The directory where the training output & configs were logged to",
                    type=dir_path,
-                   default='runs/GNN_PPO_inp_64_pro_64324_pol_64_val_64_64_N2048_B512_lr2e-04_mode_action_per_controller_Epochs_30_Nenvs_16_GRU_AntBulletEnv-v0_10-03_23-44-46')
+                   default='runs/GNN_PPO_inp_12_pro_64_64_64_64_pol_64_val_64_N2048_B64_lr3e-04_mode_flattened_Epochs_10_Nenvs_1_AntBulletEnv-v0_13-08_21-11-38')
 
     p.add_argument("--num_episodes",
                    help="The number of episodes to run to evaluate the model",
                    type=int,
-                   default=1)
+                   default=5)
 
     p.add_argument('--render',
                    help='Whether to render the evaluation with pybullet client',

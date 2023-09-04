@@ -19,9 +19,11 @@ from stable_baselines3.common.type_aliases import Schedule
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, FlattenExtractor
 from stable_baselines3.common.utils import get_device
-from NerveNet.models.nerve_net_gnn import NerveNetGNN, NerveNetGNN_V0, NerveNetGNN_V2
-from NerveNet.models.nerve_net_conv import NerveNetConv
+from NerveNet.models.nerve_net_gnn import NerveNetGNN, NerveNetGNN_V0, NerveNetGNN_V2, NerveNetDrop
+from NerveNet.models.nerve_net_conv import NerveNetConv, NerveNetConvGRU, NerveNetConvGAT, NerveNetSage, ConvDrop, GCNConvGroups
 from NerveNet.graph_util.mujoco_parser import parse_mujoco_graph
+from NerveNet.models.nerve_net_opt import SimulatedAnnealingDropout
+from NerveNet.models.dropout_state import plot_tsne
 
 
 class ActorCriticGnnPolicy(ActorCriticPolicy):
@@ -68,9 +70,13 @@ class ActorCriticGnnPolicy(ActorCriticPolicy):
                     (nn.Linear, 12)
                 ],
                 "propagate": [
-                    (NerveNetConv, 12),
-                    (NerveNetConv, 12),
-                    (NerveNetConv, 12)
+                    (NerveNetConv, 32),
+
+                    (NerveNetConv, 32),
+                    
+                    (NerveNetConv, 32),
+                    # (ConvDrop, 64),
+                    (nn.Linear, 64)
                 ],
                 "policy": [
                     (nn.Linear, 64)
@@ -138,7 +144,8 @@ class ActorCriticGnnPolicy(ActorCriticPolicy):
         """
         Create the policy and value networks.
         """
-        self.mlp_extractor = self.mlp_extractor_class(self.features_dim, net_arch=self.net_arch, activation_fn=self.activation_fn,
+        # print(f"self.features_dim {self.features_dim}")
+        self.mlp_extractor = self.mlp_extractor_class(self.features_dim, net_arch=self.net_arch, activation_fn=self.activation_fn, 
                                                       **self.mlp_extractor_kwargs
                                                       )
 
@@ -152,12 +159,14 @@ class ActorCriticGnnPolicy(ActorCriticPolicy):
         """
         # Preprocess the observation if needed
         features = self.extract_features(obs)
+        # print(f"fetures:, {features}")
         latent_pi,  latent_vf = self.mlp_extractor(features)
+       
 
         # Features for sde
         latent_sde = latent_pi
         if self.sde_features_extractor is not None:
-            latent_sde = self.sde_features_extractor(features)
+            latent_sde = self.sde_features_extractor()
         return latent_pi, latent_vf, latent_sde
 
     def _predict(self, observation: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
@@ -173,6 +182,7 @@ class ActorCriticGnnPolicy(ActorCriticPolicy):
         distribution = self._get_action_dist_from_latent(
             latent_pi, latent_sde)
         return distribution.get_actions(deterministic=deterministic)
+    
 
     def forward(self, obs: torch.Tensor, deterministic: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -188,7 +198,7 @@ class ActorCriticGnnPolicy(ActorCriticPolicy):
         values = latent_vf  # nervenet GNN already returns the values
         # Evaluate the values for the given observations
         distribution = self._get_action_dist_from_latent(
-            mean_actions, latent_sde=latent_sde)
+            mean_actions)
         actions = distribution.get_actions(deterministic=deterministic)
 
         log_prob = distribution.log_prob(actions)
@@ -281,6 +291,13 @@ class ActorCriticGnnPolicy_V2(ActorCriticGnnPolicy):
         mean_actions = latent_pi
         values = latent_vf  # nervenet GNN already returns the values
         # Evaluate the values for the given observations
+
+        mean_embedding_across_batches = latent_pi.mean(dim=0).cpu().detach().numpy()
+        plot_tsne(mean_embedding_across_batches)
+
+        mean_actions = latent_pi
+        values = latent_vf  # nervenet GNN already returns the values
+        print(latent_pi)
         distribution = self._get_action_dist_from_latent(
             mean_actions, log_std_action, latent_sde=latent_sde)
         actions = distribution.get_actions(deterministic=deterministic)
@@ -331,7 +348,7 @@ class ActorCriticGnnPolicy_V0(ActorCriticGnnPolicy):
     ):
         if "mlp_extractor_class" in kwargs.keys():
             kwargs.pop("mlp_extractor_class")
-        super(ActorCriticGnnPolicy_V0, self).__init__(
+        super(ActorCriticGnnPolicy, self).__init__(
             *args,
             mlp_extractor_class=NerveNetGNN_V0,
             **kwargs

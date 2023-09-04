@@ -12,12 +12,15 @@ from pathlib import Path
 import gym
 from stable_baselines3 import PPO, A2C
 from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common import monitor   
 from stable_baselines3.common.policies import ActorCriticPolicy
 import pybullet_envs  # register pybullet envs from bullet3
-
 from NerveNet.policies import register_policies
-
-
+from NerveNet.models.nerve_net_conv import SimulatedAnnealingDropout
+from NerveNet.models.drop_call import RewardCallback
+from NerveNet.models.nerve_net_gnn import NerveNetGNN
+from NerveNet.models.dropout_state import DropoutState, DropoutManager 
+ 
 def evaluate(model, num_episodes=100):
     """
     Evaluate a RL agent
@@ -51,13 +54,13 @@ def evaluate(model, num_episodes=100):
 task_name = 'AntBulletEnv-v0'
 
 env = gym.make(task_name)
-
-model = PPO("GnnPolicy",
+dropout_optimizer =  SimulatedAnnealingDropout()
+model = PPO("GnnPolicy", 
             env,
             # reducing batch_size to 1
-            n_steps=1024,
+            n_steps=2048,
             verbose=1,
-            tensorboard_log="runs", batch_size=32,
+            tensorboard_log="runs", batch_size=64,
             learning_rate=1e-3,
             gamma=0.99,
             gae_lambda=0.95,
@@ -67,14 +70,18 @@ model = PPO("GnnPolicy",
                 'mlp_extractor_kwargs': {
                     'task_name': task_name,
                     'xml_assets_path': None
-                }
+                },
             },
             )
 
-mean_reward_before_train = evaluate(model, num_episodes=4)
-model.learn(total_timesteps=2000000, tb_log_name='{}_{}'.format(
-    task_name, datetime.now().strftime('%d-%m_%H-%M-%S')))
-model.save("a2c_ant")
+policy_instance = model
+dropout_manager = DropoutManager(model=policy_instance, optimizer=dropout_optimizer)
+callback = RewardCallback(dropout_optimizer = dropout_optimizer, manager=dropout_manager)  
+# mean_reward_before_train = evaluate(model, num_episodes=4)
+model.learn(total_timesteps=2500000, tb_log_name='{}_{}'.format(
+    task_name, datetime.now().strftime('%d-%m_%H-%M-%S')), callback = callback)
+model.save("ppo_ant")
 mean_reward = evaluate(model, num_episodes=4)
-print(mean_reward_before_train)
+# print(mean_reward_before_train) 
 print(mean_reward)
+ 
