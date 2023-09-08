@@ -19,8 +19,8 @@ from stable_baselines3.common.type_aliases import Schedule
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, FlattenExtractor
 from stable_baselines3.common.utils import get_device
-from NerveNet.models.nerve_net_gnn import NerveNetGNN, NerveNetGNN_V0, NerveNetGNN_V2, NerveNetDrop
-from NerveNet.models.nerve_net_conv import NerveNetConv, NerveNetConvGRU, NerveNetConvGAT, NerveNetSage, ConvDrop, GCNConvGroups
+from NerveNet.models.nerve_net_gnn import NerveNetGNN, NerveNetGNN_V0, NerveNetGNN_V2
+from NerveNet.models.nerve_net_conv import NerveNetConv
 from NerveNet.graph_util.mujoco_parser import parse_mujoco_graph
 from NerveNet.models.nerve_net_opt import SimulatedAnnealingDropout
 from NerveNet.models.dropout_state import plot_tsne
@@ -125,6 +125,7 @@ class ActorCriticGnnPolicy(ActorCriticPolicy):
             optimizer_kwargs=optimizer_kwargs,
         )
         self.action_net = torch.nn.Identity()
+        self.save_embeddings = False 
 
     @property
     def device(self) -> torch.device:
@@ -167,7 +168,14 @@ class ActorCriticGnnPolicy(ActorCriticPolicy):
         latent_sde = latent_pi
         if self.sde_features_extractor is not None:
             latent_sde = self.sde_features_extractor()
+
+        if self.save_embeddings:
+             torch.save({"latent_pi": latent_pi, "latent_vf": latent_vf, "latent_sde": latent_sde}, "embeddings_output.pt")
         return latent_pi, latent_vf, latent_sde
+
+    def enable_embedding_saving(self):
+        self.save_embeddings = True
+
 
     def _predict(self, observation: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
         """

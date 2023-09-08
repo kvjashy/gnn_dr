@@ -164,6 +164,12 @@ def train(args):
 
     model.save(os.path.join(args.tensorboard_log +
                             "/" + log_name, args.model_name))
+    
+    def save_all_embeddings(self):
+        embeddings_array = np.array(self.ankle_embedding_list)  # shape: [timesteps, batchsize, number_of_nodes, embedding_dim]
+        with open('ankle_embeddings.npy', 'wb') as f:
+            np.save(f, embeddings_array)
+
 
 
 def dir_path(path):
@@ -211,11 +217,11 @@ def parse_arguments():
     p.add_argument('--n_envs',
                    help="Number of environments to run in parallel to collect rollout. Each environment requires one CPU",
                    type=int,
-                   default=2)
+                   default=3)
 
     p.add_argument('--seed', help='Random seed',
                    type=int,
-                   default=3)
+                   default=1)
     p.add_argument('--device',
                    help='Device (cpu, cuda, ...) on which the code should be run.'
                         'Setting it to auto, the code will be run on the GPU if possible.',

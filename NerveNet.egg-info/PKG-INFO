@@ -1,0 +1,6 @@
+Metadata-Version: 2.1
+Name: NerveNet
+Version: 1.0.0
+Summary: Implementation of NerveNet for use with PyTorch and StableBaselines3
+Author: Tobias Schmidt, Hannes Stärk
+Author-email: tsbaunatal@gmail.com

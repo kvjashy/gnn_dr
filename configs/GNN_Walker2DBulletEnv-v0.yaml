@@ -4,7 +4,7 @@ task_name: Walker2DBulletEnv-v0
 alg: PPO
 policy: GnnPolicy
 
-device: cuda
+device: cpu
 
 learning_rate: 3.0e-4
 total_timesteps: 1000000

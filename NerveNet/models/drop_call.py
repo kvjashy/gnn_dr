@@ -15,10 +15,17 @@ class RewardCallback(BaseCallback):
         self.manager = manager 
         self.log_interval = 5 # Set the logging interval
         self.episode_count = 0
+        self.total_episodes = 3
+        self.embedding_buffer =[]
     
     
     def _on_step(self):
-        return True
+        # if self.episode_count == self.total_episodes-1:  # Only for the last episode
+        #     current_embedding = self.model.policy.mlp_extractor.save_all_embeddings()
+        #     print(current_embedding)
+        #     self.embedding_buffer.append(current_embedding)
+
+        return True        
     
     def _on_rollout_end(self) -> None:
         if "rollout_buffer" in self.locals:
@@ -31,8 +38,16 @@ class RewardCallback(BaseCallback):
             #     # Store this difference or use it further if needed
 
             # self.prev_episode_mean_reward = current_episode_mean_reward
+            
+            # if self.episode_count == self.total_episodes-1:
+            #     print("start")
+            #     with open('root_last_episode1.npy', 'wb') as f:
+            #         print(self.embedding_buffer)
+            #         np.save(f, np.array(self.embedding_buffer))
+            #     print("end")
+            # self.episode_count += 1  # Increment the episode count
+            # self.embedding_buffer=[]
 
-            self.episode_count += 1  # Increment the episode count
             
             # If episode count is a multiple of log_interval, log the SD
             if self.episode_count % self.log_interval == 0:

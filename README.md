@@ -4,6 +4,10 @@
 
 ### Local Development and Setup
 
+Repo based on a clone [from](https://github.com/HannesStark/gnn-reinforcement-learning). New params have not yet been integrated into train.py properly, so changes will have to be made directly as suggested in comments. 
+Running train.py will give best results using dropout, to comment go to NerveNet/models/nerve_net_gnn file and comment out line as suggested in comments.
+<br/>
+
 First we need to install all requirements. Preferably in a new conda environment:
 ```
 conda create -n "adlr"

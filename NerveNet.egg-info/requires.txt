@@ -1,0 +1,8 @@
+gym
+num2words
+beautifulsoup4
+networkx
+lxml
+google-cloud-storage
+pandas
+torch-geometric

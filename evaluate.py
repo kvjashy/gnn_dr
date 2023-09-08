@@ -104,6 +104,8 @@ def init_evaluate(args):
                                                        callback=logging_callback)
     mean_reward = np.mean(episode_rewards)
     std_reward = np.std(episode_rewards)
+    max_reward = np.max(episode_rewards)  # Calculate the maximum reward
+
 
     mean_length = np.mean(episode_lengths)
     std_length = np.std(episode_lengths)
@@ -115,7 +117,7 @@ def init_evaluate(args):
     print(f"mean_reward:{mean_reward:.2f} +/- {std_reward:.2f}")
     print(f"mean_length:{mean_length:.2f} +/- {std_length:.2f}")
     print(f"mean_distance:{mean_distance:.2f} +/- {std_distance:.2f}")
-
+    print(f"max_reward:{max_reward:.2f}")
 
     eval_dir = args.train_output / "evaluation"
     eval_dir.mkdir(parents=True, exist_ok=True)
@@ -142,7 +144,7 @@ def parse_arguments():
     p.add_argument('--train_output',
                    help="The directory where the training output & configs were logged to",
                    type=dir_path,
-                   default='runs/GNN_PPO_inp_12_pro_64_64_64_64_pol_64_val_64_N2048_B64_lr3e-04_mode_flattened_Epochs_10_Nenvs_1_AntBulletEnv-v0_13-08_21-11-38')
+                   default='runs/_nerve_3')
 
     p.add_argument("--num_episodes",
                    help="The number of episodes to run to evaluate the model",
@@ -152,7 +154,7 @@ def parse_arguments():
     p.add_argument('--render',
                    help='Whether to render the evaluation with pybullet client',
                    type=bool,
-                   default=False)
+                   default=True)
 
     p.add_argument('--save_again',
                    help='Whether to save the model in a way we can load it on any system',
